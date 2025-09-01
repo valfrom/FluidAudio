@@ -25,7 +25,7 @@ public actor StreamingAsrManager {
     // Sliding window state
     private var segmentIndex: Int = 0
     private var lastProcessedFrame: Int = 0
-    private var accumulatedTokens: [Int] = []
+    private var accumulatedTimings: [TokenTiming] = []
 
     // Raw sample buffer for sliding-window assembly (absolute indexing)
     private var sampleBuffer: [Float] = []
@@ -92,7 +92,7 @@ public actor StreamingAsrManager {
         // Reset sliding window state
         segmentIndex = 0
         lastProcessedFrame = 0
-        accumulatedTokens.removeAll()
+        accumulatedTimings.removeAll()
 
         startTime = Date()
 
@@ -159,19 +159,19 @@ public actor StreamingAsrManager {
             throw error
         }
 
-        // Convert final accumulated tokens to text (proper way to avoid duplicates)
         let finalText: String
-        if let asrManager = asrManager, !accumulatedTokens.isEmpty {
+        if let asrManager = asrManager, !accumulatedTimings.isEmpty {
+            let ids = accumulatedTimings.map { $0.tokenId }
+            let times = accumulatedTimings.map { Int(round($0.startTime / 0.08)) }
             let finalResult = asrManager.processTranscriptionResult(
-                tokenIds: accumulatedTokens,
-                timestamps: [],
+                tokenIds: ids,
+                timestamps: times,
                 encoderSequenceLength: 0,
-                audioSamples: [],  // Not needed for final text conversion
+                audioSamples: [],
                 processingTime: 0
             )
             finalText = finalResult.text
         } else {
-            // Fallback to text concatenation if no tokens available
             finalText = confirmedTranscript + volatileTranscript
         }
 
@@ -197,7 +197,7 @@ public actor StreamingAsrManager {
         // Reset sliding window state
         segmentIndex = 0
         lastProcessedFrame = 0
-        accumulatedTokens.removeAll()
+        accumulatedTimings.removeAll()
 
         logger.info("StreamingAsrManager reset for source: \(String(describing: self.audioSource))")
     }
@@ -311,18 +311,21 @@ public actor StreamingAsrManager {
                 leftContextSeconds: actualLeftSeconds
             )
 
-            // Call AsrManager directly with deduplication
             let (tokens, timestamps, _) = try await asrManager.transcribeStreamingChunk(
                 windowSamples,
                 source: audioSource,
                 startFrameOffset: startOffset,
                 lastProcessedFrame: lastProcessedFrame,
-                previousTokens: accumulatedTokens,
                 enableDebug: config.enableDebug
             )
 
-            // Update state
-            accumulatedTokens.append(contentsOf: tokens)
+            let chunkTimings = asrManager.createTokenTimings(from: tokens, timestamps: timestamps)
+            if !accumulatedTimings.isEmpty {
+                accumulatedTimings = asrManager.mergeTokenTimings(
+                    accumulatedTimings, chunkTimings)
+            } else {
+                accumulatedTimings = chunkTimings
+            }
             lastProcessedFrame = max(lastProcessedFrame, timestamps.max() ?? 0)
             segmentIndex += 1
 

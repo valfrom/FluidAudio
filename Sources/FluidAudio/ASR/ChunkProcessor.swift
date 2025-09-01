@@ -25,8 +25,7 @@ struct ChunkProcessor {
     func process(
         using manager: AsrManager, decoderState: inout TdtDecoderState, startTime: Date
     ) async throws -> ASRResult {
-        var allTokens: [Int] = []
-        var allTimestamps: [Int] = []
+        var allTimings: [TokenTiming] = []
 
         var centerStart = 0
         var segmentIndex = 0
@@ -38,7 +37,7 @@ struct ChunkProcessor {
 
             // Process chunk with explicit last chunk detection
 
-            let (windowTokens, windowTimestamps, maxFrame) = try await processWindowWithTokens(
+            let (windowTimings, maxFrame) = try await processWindowWithTokens(
                 centerStart: centerStart,
                 segmentIndex: segmentIndex,
                 lastProcessedFrame: lastProcessedFrame,
@@ -52,25 +51,20 @@ struct ChunkProcessor {
                 lastProcessedFrame = maxFrame
             }
 
-            // For chunks after the first, check for and remove duplicated token sequences
-            if segmentIndex > 0 && !allTokens.isEmpty && !windowTokens.isEmpty {
-                let (deduped, removedCount) = manager.removeDuplicateTokenSequence(
-                    previous: allTokens, current: windowTokens)
-                let adjustedTimestamps = Array(windowTimestamps.dropFirst(removedCount))
-
-                allTokens.append(contentsOf: deduped)
-                allTimestamps.append(contentsOf: adjustedTimestamps)
+            if segmentIndex > 0 && !allTimings.isEmpty && !windowTimings.isEmpty {
+                allTimings = manager.mergeTokenTimings(allTimings, windowTimings)
             } else {
-                allTokens.append(contentsOf: windowTokens)
-                allTimestamps.append(contentsOf: windowTimestamps)
+                allTimings = windowTimings
             }
             centerStart += centerSamples
             segmentIndex += 1
         }
+        let finalTokenIds = allTimings.map { $0.tokenId }
+        let finalTimestamps = allTimings.map { Int(round($0.startTime / 0.08)) }
         return manager.processTranscriptionResult(
-            tokenIds: allTokens,
-            timestamps: allTimestamps,
-            encoderSequenceLength: 0,  // Not relevant for chunk processing
+            tokenIds: finalTokenIds,
+            timestamps: finalTimestamps,
+            encoderSequenceLength: 0,
             audioSamples: audioSamples,
             processingTime: Date().timeIntervalSince(startTime)
         )
@@ -83,7 +77,7 @@ struct ChunkProcessor {
         isLastChunk: Bool,
         using manager: AsrManager,
         decoderState: inout TdtDecoderState
-    ) async throws -> (tokens: [Int], timestamps: [Int], maxFrame: Int) {
+    ) async throws -> (timings: [TokenTiming], maxFrame: Int) {
         // Use standard context for all chunks - the TdtDecoder handles last chunk finalization
         let adaptiveLeftContextSamples = leftContextSamples
 
@@ -94,7 +88,7 @@ struct ChunkProcessor {
 
         // If nothing to process, return empty
         if leftStart >= rightEnd {
-            return ([], [], 0)
+            return ([], 0)
         }
 
         let chunkSamples = Array(audioSamples[leftStart..<rightEnd])
@@ -120,14 +114,12 @@ struct ChunkProcessor {
         )
 
         if tokens.isEmpty || encLen == 0 {
-            return ([], [], 0)
+            return ([], 0)
         }
 
-        // Take all tokens from decoder (it already processed only the relevant frames)
-        let filteredTokens = tokens
-        let filteredTimestamps = timestamps
+        let timings = manager.createTokenTimings(from: tokens, timestamps: timestamps)
         let maxFrame = timestamps.max() ?? 0
 
-        return (filteredTokens, filteredTimestamps, maxFrame)
+        return (timings, maxFrame)
     }
 }

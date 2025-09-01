@@ -128,7 +128,6 @@ extension AsrManager {
         source: AudioSource,
         startFrameOffset: Int,
         lastProcessedFrame: Int,
-        previousTokens: [Int] = [],
         enableDebug: Bool
     ) async throws -> (tokens: [Int], timestamps: [Int], encoderSequenceLength: Int) {
         // Select and copy decoder state for the source
@@ -150,18 +149,6 @@ extension AsrManager {
             microphoneDecoderState = state
         } else {
             systemDecoderState = state
-        }
-
-        // Apply token deduplication if previous tokens are provided
-        if !previousTokens.isEmpty && !tokens.isEmpty {
-            let (deduped, removedCount) = removeDuplicateTokenSequence(previous: previousTokens, current: tokens)
-            let adjustedTimestamps = removedCount > 0 ? Array(timestamps.dropFirst(removedCount)) : timestamps
-
-            if enableDebug && removedCount > 0 {
-                logger.debug("Streaming chunk: removed \(removedCount) duplicate tokens")
-            }
-
-            return (deduped, adjustedTimestamps, encLen)
         }
 
         return (tokens, timestamps, encLen)
@@ -241,7 +228,7 @@ extension AsrManager {
     }
 
     /// Convert frame timestamps to TokenTiming objects
-    private func createTokenTimings(from tokenIds: [Int], timestamps: [Int]) -> [TokenTiming] {
+    internal func createTokenTimings(from tokenIds: [Int], timestamps: [Int]) -> [TokenTiming] {
         guard !tokenIds.isEmpty && !timestamps.isEmpty && tokenIds.count == timestamps.count else {
             return []
         }
@@ -308,77 +295,208 @@ extension AsrManager {
         return slicedArray
     }
 
-    /// Remove duplicate token sequences at the start of the current list that overlap
-    /// with the tail of the previous accumulated tokens. Returns deduplicated current tokens
-    /// and the number of removed leading tokens so caller can drop aligned timestamps.
-    /// Ideally this is not needed. We need to make some more fixes to the TDT decoding logic,
-    /// this should be a temporary workaround.
-    internal func removeDuplicateTokenSequence(
-        previous: [Int], current: [Int], maxOverlap: Int = 12
-    ) -> (deduped: [Int], removedCount: Int) {
+    internal func mergeTokenTimings(
+        _ a: [TokenTiming],
+        _ b: [TokenTiming],
+        overlapDuration: Double = 0.32
+    ) -> [TokenTiming] {
+        if a.isEmpty { return b }
+        if b.isEmpty { return a }
+        do {
+            return try mergeLongestContiguous(a: a, b: b, overlapDuration: overlapDuration)
+        } catch {
+            return mergeLongestCommonSubsequence(a: a, b: b, overlapDuration: overlapDuration)
+        }
+    }
 
-        // Handle single punctuation token duplicates first
-        let punctuationTokens = [7883, 7952, 7948]  // period, question, exclamation
-        var workingCurrent = current
-        var removedCount = 0
+    private enum MergeError: Error {
+        case noPairs
+    }
 
-        if !previous.isEmpty && !workingCurrent.isEmpty && previous.last == workingCurrent.first
-            && punctuationTokens.contains(workingCurrent.first!)
-        {
-            // Remove the duplicate punctuation token from the beginning of current
-            workingCurrent = Array(workingCurrent.dropFirst())
-            removedCount += 1
+    private func mergeLongestContiguous(
+        a: [TokenTiming],
+        b: [TokenTiming],
+        overlapDuration: Double
+    ) throws -> [TokenTiming] {
+        if a.isEmpty { return b }
+        if b.isEmpty { return a }
+
+        guard let aEndTime = a.last?.endTime, let bStartTime = b.first?.startTime else {
+            return a + b
         }
 
-        // Check for suffix-prefix overlap: end of previous matches beginning of current
-        let maxSearchLength = min(15, previous.count)  // last 15 tokens of previous
-        let maxMatchLength = min(maxOverlap, workingCurrent.count)  // first 12 tokens of current
-
-        guard maxSearchLength >= 2 && maxMatchLength >= 2 else {
-            return (workingCurrent, removedCount)
+        if aEndTime <= bStartTime {
+            return a + b
         }
 
-        // Search for overlapping sequences from longest to shortest
-        for overlapLength in (2...min(maxSearchLength, maxMatchLength)).reversed() {
-            // Check if the last `overlapLength` tokens of previous match the first `overlapLength` tokens of current
-            let prevSuffix = Array(previous.suffix(overlapLength))
-            let currPrefix = Array(workingCurrent.prefix(overlapLength))
+        let overlapA = a.filter { $0.endTime > bStartTime - overlapDuration }
+        let overlapB = b.filter { $0.startTime < aEndTime + overlapDuration }
 
-            if prevSuffix == currPrefix {
-                if config.enableDebug {
-                    logger.debug("Found exact suffix-prefix overlap of length \(overlapLength): \(prevSuffix)")
-                }
-                let finalRemoved = removedCount + overlapLength
-                return (Array(workingCurrent.dropFirst(overlapLength)), finalRemoved)
-            }
+        let enoughPairs = overlapA.count / 2
+
+        if overlapA.count < 2 || overlapB.count < 2 {
+            let cutoff = (aEndTime + bStartTime) / 2
+            let partA = a.filter { $0.endTime <= cutoff }
+            let partB = b.filter { $0.startTime >= cutoff }
+            return partA + partB
         }
 
-        // Extended search: look for partial overlaps within the sequences
-        for overlapLength in (2...min(maxSearchLength, maxMatchLength)).reversed() {
-            let prevStart = max(0, previous.count - maxSearchLength)
-            let prevEnd = previous.count - overlapLength + 1
-            if prevEnd <= prevStart { continue }
-
-            for startIndex in prevStart..<prevEnd {
-                let prevSub = Array(previous[startIndex..<(startIndex + overlapLength)])
-                let currEnd = max(0, workingCurrent.count - overlapLength + 1)
-
-                for currentStart in 0..<min(8, currEnd) {  // Increased search range
-                    let currSub = Array(workingCurrent[currentStart..<(currentStart + overlapLength)])
-                    if prevSub == currSub {
-                        if config.enableDebug {
-                            logger.debug(
-                                "Found duplicate sequence length=\(overlapLength) at currStart=\(currentStart): \(prevSub)"
-                            )
-                        }
-                        let finalRemoved = removedCount + currentStart + overlapLength
-                        return (Array(workingCurrent.dropFirst(currentStart + overlapLength)), finalRemoved)
+        var best: [(Int, Int)] = []
+        for i in 0..<overlapA.count {
+            for j in 0..<overlapB.count {
+                if overlapA[i].tokenId == overlapB[j].tokenId
+                    && abs(overlapA[i].startTime - overlapB[j].startTime) < overlapDuration / 2
+                {
+                    var current: [(Int, Int)] = []
+                    var k = i
+                    var l = j
+                    while k < overlapA.count && l < overlapB.count
+                        && overlapA[k].tokenId == overlapB[l].tokenId
+                        && abs(overlapA[k].startTime - overlapB[l].startTime) < overlapDuration / 2
+                    {
+                        current.append((k, l))
+                        k += 1
+                        l += 1
+                    }
+                    if current.count > best.count {
+                        best = current
                     }
                 }
             }
         }
 
-        return (workingCurrent, removedCount)
+        if best.count >= enoughPairs {
+            let aStartIdx = a.count - overlapA.count
+            let indicesA = best.map { aStartIdx + $0.0 }
+            let indicesB = best.map { $0.1 }
+
+            var result: [TokenTiming] = []
+            result.append(contentsOf: a[0..<indicesA[0]])
+
+            for i in 0..<best.count {
+                let idxA = indicesA[i]
+                let idxB = indicesB[i]
+                result.append(a[idxA])
+
+                if i < best.count - 1 {
+                    let nextIdxA = indicesA[i + 1]
+                    let nextIdxB = indicesB[i + 1]
+
+                    let gapA = Array(a[(idxA + 1)..<nextIdxA])
+                    let gapB = Array(b[(idxB + 1)..<nextIdxB])
+
+                    if gapB.count > gapA.count {
+                        result.append(contentsOf: gapB)
+                    } else {
+                        result.append(contentsOf: gapA)
+                    }
+                }
+            }
+
+            if let lastIdxB = indicesB.last {
+                result.append(contentsOf: b[(lastIdxB + 1)...])
+            }
+            return result
+        } else {
+            throw MergeError.noPairs
+        }
+    }
+
+    private func mergeLongestCommonSubsequence(
+        a: [TokenTiming],
+        b: [TokenTiming],
+        overlapDuration: Double
+    ) -> [TokenTiming] {
+        if a.isEmpty { return b }
+        if b.isEmpty { return a }
+
+        guard let aEndTime = a.last?.endTime, let bStartTime = b.first?.startTime else {
+            return a + b
+        }
+
+        if aEndTime <= bStartTime {
+            return a + b
+        }
+
+        let overlapA = a.filter { $0.endTime > bStartTime - overlapDuration }
+        let overlapB = b.filter { $0.startTime < aEndTime + overlapDuration }
+
+        if overlapA.count < 2 || overlapB.count < 2 {
+            let cutoff = (aEndTime + bStartTime) / 2
+            let partA = a.filter { $0.endTime <= cutoff }
+            let partB = b.filter { $0.startTime >= cutoff }
+            return partA + partB
+        }
+
+        var dp = Array(repeating: Array(repeating: 0, count: overlapB.count + 1), count: overlapA.count + 1)
+        for i in 1...overlapA.count {
+            for j in 1...overlapB.count {
+                if overlapA[i - 1].tokenId == overlapB[j - 1].tokenId
+                    && abs(overlapA[i - 1].startTime - overlapB[j - 1].startTime) < overlapDuration / 2
+                {
+                    dp[i][j] = dp[i - 1][j - 1] + 1
+                } else {
+                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+                }
+            }
+        }
+
+        var pairs: [(Int, Int)] = []
+        var i = overlapA.count
+        var j = overlapB.count
+        while i > 0 && j > 0 {
+            if overlapA[i - 1].tokenId == overlapB[j - 1].tokenId
+                && abs(overlapA[i - 1].startTime - overlapB[j - 1].startTime) < overlapDuration / 2
+            {
+                pairs.append((i - 1, j - 1))
+                i -= 1
+                j -= 1
+            } else if dp[i - 1][j] > dp[i][j - 1] {
+                i -= 1
+            } else {
+                j -= 1
+            }
+        }
+
+        pairs.reverse()
+
+        if pairs.isEmpty {
+            let cutoff = (aEndTime + bStartTime) / 2
+            let partA = a.filter { $0.endTime <= cutoff }
+            let partB = b.filter { $0.startTime >= cutoff }
+            return partA + partB
+        }
+
+        let aStartIdx = a.count - overlapA.count
+        let indicesA = pairs.map { aStartIdx + $0.0 }
+        let indicesB = pairs.map { $0.1 }
+
+        var result: [TokenTiming] = []
+        result.append(contentsOf: a[0..<indicesA[0]])
+
+        for idx in 0..<pairs.count {
+            let idxA = indicesA[idx]
+            let idxB = indicesB[idx]
+            result.append(a[idxA])
+
+            if idx < pairs.count - 1 {
+                let nextIdxA = indicesA[idx + 1]
+                let nextIdxB = indicesB[idx + 1]
+                let gapA = Array(a[(idxA + 1)..<nextIdxA])
+                let gapB = Array(b[(idxB + 1)..<nextIdxB])
+                if gapB.count > gapA.count {
+                    result.append(contentsOf: gapB)
+                } else {
+                    result.append(contentsOf: gapA)
+                }
+            }
+        }
+
+        if let lastIdxB = indicesB.last {
+            result.append(contentsOf: b[(lastIdxB + 1)...])
+        }
+
+        return result
     }
 
     /// Calculate start frame offset for a sliding window segment
