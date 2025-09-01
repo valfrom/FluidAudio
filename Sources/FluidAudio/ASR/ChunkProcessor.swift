@@ -55,15 +55,16 @@ struct ChunkProcessor {
             // For chunks after the first, check for and remove duplicated token sequences
             if segmentIndex > 0 && !allTokens.isEmpty && !windowTokens.isEmpty {
                 if let (index, startIndex) = manager.findDuplicateTokenSequence(
-                    previous: allTokens, current: windowTokens) {
+                    previous: allTokens, current: windowTokens)
+                {
                     // We shoud return index where duplicated sequence starts and remove it from allTokens and allTimestamps and just add windowTokens and windowTimestamps as is
-                    
+
                     print("allTokens: \(allTokens)")
                     print("windowTokens: \(windowTokens)")
-                    
+
                     allTokens.removeSubrange(index...)
                     allTimestamps.removeSubrange(index...)
-                    
+
                     allTokens.append(contentsOf: windowTokens[startIndex...])
                     allTimestamps.append(contentsOf: windowTimestamps[startIndex...])
                 } else {
@@ -133,11 +134,16 @@ struct ChunkProcessor {
             return ([], [], 0)
         }
 
+        // Convert local chunk timestamps to global frame indices
+        // Each encoder frame represents 80ms of audio (12.5 fps)
+        let samplesPerFrame = Int(Double(sampleRate) * 0.08)  // 1280 at 16kHz
+        let centerStartFrame = centerStart / samplesPerFrame
+        let adjustedTimestamps = timestamps.map { $0 - startFrameOffset + centerStartFrame }
+
         // Take all tokens from decoder (it already processed only the relevant frames)
         let filteredTokens = tokens
-        let filteredTimestamps = timestamps
-        let maxFrame = timestamps.max() ?? 0
+        let maxFrame = adjustedTimestamps.max() ?? 0
 
-        return (filteredTokens, filteredTimestamps, maxFrame)
+        return (filteredTokens, adjustedTimestamps, maxFrame)
     }
 }
