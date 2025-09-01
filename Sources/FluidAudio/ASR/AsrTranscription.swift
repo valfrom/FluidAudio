@@ -152,9 +152,10 @@ extension AsrManager {
             systemDecoderState = state
         }
 
-        // Apply token deduplication if previous tokens are provided
+        // Apply token merging if previous tokens are provided
         if !previousTokens.isEmpty && !tokens.isEmpty {
-            let (deduped, removedCount) = removeDuplicateTokenSequence(previous: previousTokens, current: tokens)
+            let (merged, removedCount) = mergeTokens(previous: previousTokens, current: tokens)
+            let deduped = Array(merged.dropFirst(previousTokens.count))
             let adjustedTimestamps = removedCount > 0 ? Array(timestamps.dropFirst(removedCount)) : timestamps
 
             if enableDebug && removedCount > 0 {
@@ -313,72 +314,101 @@ extension AsrManager {
     /// and the number of removed leading tokens so caller can drop aligned timestamps.
     /// Ideally this is not needed. We need to make some more fixes to the TDT decoding logic,
     /// this should be a temporary workaround.
-    internal func removeDuplicateTokenSequence(
-        previous: [Int], current: [Int], maxOverlap: Int = 12
-    ) -> (deduped: [Int], removedCount: Int) {
+    internal enum MergeError: Error {
+        case noContiguousMatch
+    }
 
-        // Handle single punctuation token duplicates first
-        let punctuationTokens = [7883, 7952, 7948]  // period, question, exclamation
-        var workingCurrent = current
-        var removedCount = 0
+    internal func mergeLongestContiguous(
+        previous: [Int],
+        current: [Int],
+        maxOverlap: Int = 12
+    ) throws -> [Int] {
+        if previous.isEmpty { return current }
+        if current.isEmpty { return previous }
 
-        if !previous.isEmpty && !workingCurrent.isEmpty && previous.last == workingCurrent.first
-            && punctuationTokens.contains(workingCurrent.first!)
-        {
-            // Remove the duplicate punctuation token from the beginning of current
-            workingCurrent = Array(workingCurrent.dropFirst())
-            removedCount += 1
-        }
-
-        // Check for suffix-prefix overlap: end of previous matches beginning of current
-        let maxSearchLength = min(15, previous.count)  // last 15 tokens of previous
-        let maxMatchLength = min(maxOverlap, workingCurrent.count)  // first 12 tokens of current
-
-        guard maxSearchLength >= 2 && maxMatchLength >= 2 else {
-            return (workingCurrent, removedCount)
-        }
-
-        // Search for overlapping sequences from longest to shortest
-        for overlapLength in (2...min(maxSearchLength, maxMatchLength)).reversed() {
-            // Check if the last `overlapLength` tokens of previous match the first `overlapLength` tokens of current
+        let maxSearchLength = min(maxOverlap, min(previous.count, current.count))
+        for overlapLength in stride(from: maxSearchLength, through: 1, by: -1) {
             let prevSuffix = Array(previous.suffix(overlapLength))
-            let currPrefix = Array(workingCurrent.prefix(overlapLength))
-
+            let currPrefix = Array(current.prefix(overlapLength))
             if prevSuffix == currPrefix {
-                if config.enableDebug {
-                    logger.debug("Found exact suffix-prefix overlap of length \(overlapLength): \(prevSuffix)")
+                return previous + Array(current.dropFirst(overlapLength))
+            }
+        }
+        throw MergeError.noContiguousMatch
+    }
+
+    internal func mergeLongestCommonSubsequence(
+        previous: [Int],
+        current: [Int],
+        maxOverlap: Int = 12
+    ) -> [Int] {
+        if previous.isEmpty { return current }
+        if current.isEmpty { return previous }
+
+        let overlapA = Array(previous.suffix(maxOverlap))
+        let overlapB = Array(current.prefix(maxOverlap))
+        if overlapA.count < 2 || overlapB.count < 2 {
+            return previous + current
+        }
+
+        let m = overlapA.count
+        let n = overlapB.count
+        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+
+        for i in 1...m {
+            for j in 1...n {
+                if overlapA[i - 1] == overlapB[j - 1] {
+                    dp[i][j] = dp[i - 1][j - 1] + 1
+                } else {
+                    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
                 }
-                let finalRemoved = removedCount + overlapLength
-                return (Array(workingCurrent.dropFirst(overlapLength)), finalRemoved)
             }
         }
 
-        // Extended search: look for partial overlaps within the sequences
-        for overlapLength in (2...min(maxSearchLength, maxMatchLength)).reversed() {
-            let prevStart = max(0, previous.count - maxSearchLength)
-            let prevEnd = previous.count - overlapLength + 1
-            if prevEnd <= prevStart { continue }
-
-            for startIndex in prevStart..<prevEnd {
-                let prevSub = Array(previous[startIndex..<(startIndex + overlapLength)])
-                let currEnd = max(0, workingCurrent.count - overlapLength + 1)
-
-                for currentStart in 0..<min(8, currEnd) {  // Increased search range
-                    let currSub = Array(workingCurrent[currentStart..<(currentStart + overlapLength)])
-                    if prevSub == currSub {
-                        if config.enableDebug {
-                            logger.debug(
-                                "Found duplicate sequence length=\(overlapLength) at currStart=\(currentStart): \(prevSub)"
-                            )
-                        }
-                        let finalRemoved = removedCount + currentStart + overlapLength
-                        return (Array(workingCurrent.dropFirst(currentStart + overlapLength)), finalRemoved)
-                    }
-                }
+        var i = m
+        var j = n
+        var indicesB: [Int] = []
+        while i > 0 && j > 0 {
+            if overlapA[i - 1] == overlapB[j - 1] {
+                indicesB.append(j - 1)
+                i -= 1
+                j -= 1
+            } else if dp[i - 1][j] > dp[i][j - 1] {
+                i -= 1
+            } else {
+                j -= 1
             }
         }
+        indicesB.reverse()
 
-        return (workingCurrent, removedCount)
+        guard let lastIndexB = indicesB.last else {
+            return previous + current
+        }
+        return previous + Array(current.dropFirst(lastIndexB + 1))
+    }
+
+    internal func mergeTokens(
+        previous: [Int],
+        current: [Int],
+        maxOverlap: Int = 12
+    ) -> (merged: [Int], removedCount: Int) {
+        do {
+            let merged = try mergeLongestContiguous(
+                previous: previous,
+                current: current,
+                maxOverlap: maxOverlap
+            )
+            let removed = previous.count + current.count - merged.count
+            return (merged, removed)
+        } catch {
+            let merged = mergeLongestCommonSubsequence(
+                previous: previous,
+                current: current,
+                maxOverlap: maxOverlap
+            )
+            let removed = previous.count + current.count - merged.count
+            return (merged, removed)
+        }
     }
 
     /// Calculate start frame offset for a sliding window segment

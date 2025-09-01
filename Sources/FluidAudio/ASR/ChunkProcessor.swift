@@ -52,17 +52,12 @@ struct ChunkProcessor {
                 lastProcessedFrame = maxFrame
             }
 
-            // For chunks after the first, check for and remove duplicated token sequences
-            if segmentIndex > 0 && !allTokens.isEmpty && !windowTokens.isEmpty {
-                let (deduped, removedCount) = manager.removeDuplicateTokenSequence(
-                    previous: allTokens, current: windowTokens)
+            // Merge tokens with existing sequence, removing duplicates
+            if !windowTokens.isEmpty {
+                let (merged, removedCount) = manager.mergeTokens(previous: allTokens, current: windowTokens)
                 let adjustedTimestamps = Array(windowTimestamps.dropFirst(removedCount))
-
-                allTokens.append(contentsOf: deduped)
+                allTokens = merged
                 allTimestamps.append(contentsOf: adjustedTimestamps)
-            } else {
-                allTokens.append(contentsOf: windowTokens)
-                allTimestamps.append(contentsOf: windowTimestamps)
             }
             centerStart += centerSamples
             segmentIndex += 1
