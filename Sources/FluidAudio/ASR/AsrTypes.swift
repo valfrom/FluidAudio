@@ -11,7 +11,7 @@ public struct ASRConfig: Sendable {
 
     public init(
         sampleRate: Int = 16000,
-        enableDebug: Bool = true,
+        enableDebug: Bool = false,
         tdtConfig: TdtConfig = .default
     ) {
         self.sampleRate = sampleRate
