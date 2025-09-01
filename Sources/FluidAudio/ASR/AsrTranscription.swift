@@ -129,6 +129,7 @@ extension AsrManager {
         startFrameOffset: Int,
         lastProcessedFrame: Int,
         previousTokens: [Int] = [],
+        previousTimestamps: [Int] = [],
         enableDebug: Bool
     ) async throws -> (tokens: [Int], timestamps: [Int], encoderSequenceLength: Int) {
         // Select and copy decoder state for the source
@@ -153,16 +154,16 @@ extension AsrManager {
         }
 
         // Apply token merging if previous tokens are provided
-        if !previousTokens.isEmpty && !tokens.isEmpty {
-            let (merged, removedCount) = mergeTokens(previous: previousTokens, current: tokens)
-            let deduped = Array(merged.dropFirst(previousTokens.count))
-            let adjustedTimestamps = removedCount > 0 ? Array(timestamps.dropFirst(removedCount)) : timestamps
-
-            if enableDebug && removedCount > 0 {
-                logger.debug("Streaming chunk: removed \(removedCount) duplicate tokens")
-            }
-
-            return (deduped, adjustedTimestamps, encLen)
+        if !previousTokens.isEmpty && !previousTimestamps.isEmpty && !tokens.isEmpty {
+            let (mergedTokens, mergedTimestamps) = mergeTokens(
+                previousTokens: previousTokens,
+                previousTimestamps: previousTimestamps,
+                currentTokens: tokens,
+                currentTimestamps: timestamps
+            )
+            let dedupedTokens = Array(mergedTokens.dropFirst(previousTokens.count))
+            let dedupedTimestamps = Array(mergedTimestamps.dropFirst(previousTimestamps.count))
+            return (dedupedTokens, dedupedTimestamps, encLen)
         }
 
         return (tokens, timestamps, encLen)
@@ -242,7 +243,7 @@ extension AsrManager {
     }
 
     /// Convert frame timestamps to TokenTiming objects
-    private func createTokenTimings(from tokenIds: [Int], timestamps: [Int]) -> [TokenTiming] {
+    internal func createTokenTimings(from tokenIds: [Int], timestamps: [Int]) -> [TokenTiming] {
         guard !tokenIds.isEmpty && !timestamps.isEmpty && tokenIds.count == timestamps.count else {
             return []
         }
@@ -309,55 +310,127 @@ extension AsrManager {
         return slicedArray
     }
 
-    /// Remove duplicate token sequences at the start of the current list that overlap
-    /// with the tail of the previous accumulated tokens. Returns deduplicated current tokens
-    /// and the number of removed leading tokens so caller can drop aligned timestamps.
-    /// Ideally this is not needed. We need to make some more fixes to the TDT decoding logic,
-    /// this should be a temporary workaround.
     internal enum MergeError: Error {
-        case noContiguousMatch
+        case noPairsExceeding(Int)
     }
 
     internal func mergeLongestContiguous(
-        previous: [Int],
-        current: [Int],
-        maxOverlap: Int = 12
-    ) throws -> [Int] {
-        if previous.isEmpty { return current }
-        if current.isEmpty { return previous }
+        _ a: [TokenTiming],
+        _ b: [TokenTiming],
+        overlapDuration: TimeInterval
+    ) throws -> [TokenTiming] {
+        if a.isEmpty { return b }
+        if b.isEmpty { return a }
 
-        let maxSearchLength = min(maxOverlap, min(previous.count, current.count))
-        for overlapLength in stride(from: maxSearchLength, through: 1, by: -1) {
-            let prevSuffix = Array(previous.suffix(overlapLength))
-            let currPrefix = Array(current.prefix(overlapLength))
-            if prevSuffix == currPrefix {
-                return previous + Array(current.dropFirst(overlapLength))
+        let aEndTime = a.last!.endTime
+        let bStartTime = b.first!.startTime
+
+        if aEndTime <= bStartTime {
+            return a + b
+        }
+
+        let overlapA = a.filter { $0.endTime > bStartTime - overlapDuration }
+        let overlapB = b.filter { $0.startTime < aEndTime + overlapDuration }
+
+        let enoughPairs = overlapA.count / 2
+
+        if overlapA.count < 2 || overlapB.count < 2 {
+            let cutoffTime = (aEndTime + bStartTime) / 2
+            let left = a.filter { $0.endTime <= cutoffTime }
+            let right = b.filter { $0.startTime >= cutoffTime }
+            return left + right
+        }
+
+        var bestContiguous: [(Int, Int)] = []
+        for i in 0..<overlapA.count {
+            for j in 0..<overlapB.count {
+                if overlapA[i].tokenId == overlapB[j].tokenId
+                    && abs(overlapA[i].startTime - overlapB[j].startTime) < overlapDuration / 2
+                {
+                    var current: [(Int, Int)] = []
+                    var k = i
+                    var l = j
+                    while k < overlapA.count && l < overlapB.count && overlapA[k].tokenId == overlapB[l].tokenId
+                        && abs(overlapA[k].startTime - overlapB[l].startTime) < overlapDuration / 2
+                    {
+                        current.append((k, l))
+                        k += 1
+                        l += 1
+                    }
+                    if current.count > bestContiguous.count {
+                        bestContiguous = current
+                    }
+                }
             }
         }
-        throw MergeError.noContiguousMatch
+
+        if bestContiguous.count >= enoughPairs {
+            let aStartIdx = a.count - overlapA.count
+            let lcsIndicesA = bestContiguous.map { aStartIdx + $0.0 }
+            let lcsIndicesB = bestContiguous.map { $0.1 }
+
+            var result: [TokenTiming] = []
+            result += a[0..<lcsIndicesA[0]]
+
+            for i in 0..<bestContiguous.count {
+                let idxA = lcsIndicesA[i]
+                let idxB = lcsIndicesB[i]
+                result.append(a[idxA])
+                if i < bestContiguous.count - 1 {
+                    let nextIdxA = lcsIndicesA[i + 1]
+                    let nextIdxB = lcsIndicesB[i + 1]
+                    let gapA = Array(a[(idxA + 1)..<nextIdxA])
+                    let gapB = Array(b[(idxB + 1)..<nextIdxB])
+                    if gapB.count > gapA.count {
+                        result += gapB
+                    } else {
+                        result += gapA
+                    }
+                }
+            }
+
+            result += b[(lcsIndicesB.last! + 1)...]
+            return result
+        } else {
+            throw MergeError.noPairsExceeding(enoughPairs)
+        }
     }
 
     internal func mergeLongestCommonSubsequence(
-        previous: [Int],
-        current: [Int],
-        maxOverlap: Int = 12
-    ) -> [Int] {
-        if previous.isEmpty { return current }
-        if current.isEmpty { return previous }
+        _ a: [TokenTiming],
+        _ b: [TokenTiming],
+        overlapDuration: TimeInterval
+    ) -> [TokenTiming] {
+        if a.isEmpty { return b }
+        if b.isEmpty { return a }
 
-        let overlapA = Array(previous.suffix(maxOverlap))
-        let overlapB = Array(current.prefix(maxOverlap))
-        if overlapA.count < 2 || overlapB.count < 2 {
-            return previous + current
+        let aEndTime = a.last!.endTime
+        let bStartTime = b.first!.startTime
+
+        if aEndTime <= bStartTime {
+            return a + b
         }
 
-        let m = overlapA.count
-        let n = overlapB.count
-        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+        let overlapA = a.filter { $0.endTime > bStartTime - overlapDuration }
+        let overlapB = b.filter { $0.startTime < aEndTime + overlapDuration }
 
-        for i in 1...m {
-            for j in 1...n {
-                if overlapA[i - 1] == overlapB[j - 1] {
+        if overlapA.count < 2 || overlapB.count < 2 {
+            let cutoffTime = (aEndTime + bStartTime) / 2
+            let left = a.filter { $0.endTime <= cutoffTime }
+            let right = b.filter { $0.startTime >= cutoffTime }
+            return left + right
+        }
+
+        var dp = Array(
+            repeating: Array(repeating: 0, count: overlapB.count + 1),
+            count: overlapA.count + 1
+        )
+
+        for i in 1...overlapA.count {
+            for j in 1...overlapB.count {
+                if overlapA[i - 1].tokenId == overlapB[j - 1].tokenId
+                    && abs(overlapA[i - 1].startTime - overlapB[j - 1].startTime) < overlapDuration / 2
+                {
                     dp[i][j] = dp[i - 1][j - 1] + 1
                 } else {
                     dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
@@ -365,12 +438,15 @@ extension AsrManager {
             }
         }
 
-        var i = m
-        var j = n
-        var indicesB: [Int] = []
+        var i = overlapA.count
+        var j = overlapB.count
+        var lcsPairs: [(Int, Int)] = []
+
         while i > 0 && j > 0 {
-            if overlapA[i - 1] == overlapB[j - 1] {
-                indicesB.append(j - 1)
+            if overlapA[i - 1].tokenId == overlapB[j - 1].tokenId
+                && abs(overlapA[i - 1].startTime - overlapB[j - 1].startTime) < overlapDuration / 2
+            {
+                lcsPairs.append((i - 1, j - 1))
                 i -= 1
                 j -= 1
             } else if dp[i - 1][j] > dp[i][j - 1] {
@@ -379,36 +455,79 @@ extension AsrManager {
                 j -= 1
             }
         }
-        indicesB.reverse()
 
-        guard let lastIndexB = indicesB.last else {
-            return previous + current
+        lcsPairs.reverse()
+
+        if lcsPairs.isEmpty {
+            let cutoffTime = (aEndTime + bStartTime) / 2
+            let left = a.filter { $0.endTime <= cutoffTime }
+            let right = b.filter { $0.startTime >= cutoffTime }
+            return left + right
         }
-        return previous + Array(current.dropFirst(lastIndexB + 1))
+
+        let aStartIdx = a.count - overlapA.count
+        let lcsIndicesA = lcsPairs.map { aStartIdx + $0.0 }
+        let lcsIndicesB = lcsPairs.map { $0.1 }
+
+        var result: [TokenTiming] = []
+        result += a[0..<lcsIndicesA[0]]
+
+        for idx in 0..<lcsPairs.count {
+            let idxA = lcsIndicesA[idx]
+            let idxB = lcsIndicesB[idx]
+            result.append(a[idxA])
+            if idx < lcsPairs.count - 1 {
+                let nextIdxA = lcsIndicesA[idx + 1]
+                let nextIdxB = lcsIndicesB[idx + 1]
+                let gapA = Array(a[(idxA + 1)..<nextIdxA])
+                let gapB = Array(b[(idxB + 1)..<nextIdxB])
+                if gapB.count > gapA.count {
+                    result += gapB
+                } else {
+                    result += gapA
+                }
+            }
+        }
+
+        result += b[(lcsIndicesB.last! + 1)...]
+        return result
     }
 
     internal func mergeTokens(
-        previous: [Int],
-        current: [Int],
-        maxOverlap: Int = 12
-    ) -> (merged: [Int], removedCount: Int) {
-        do {
-            let merged = try mergeLongestContiguous(
-                previous: previous,
-                current: current,
-                maxOverlap: maxOverlap
-            )
-            let removed = previous.count + current.count - merged.count
-            return (merged, removed)
-        } catch {
-            let merged = mergeLongestCommonSubsequence(
-                previous: previous,
-                current: current,
-                maxOverlap: maxOverlap
-            )
-            let removed = previous.count + current.count - merged.count
-            return (merged, removed)
+        previousTokens: [Int],
+        previousTimestamps: [Int],
+        currentTokens: [Int],
+        currentTimestamps: [Int],
+        overlapDuration: TimeInterval = 0.5
+    ) -> (tokens: [Int], timestamps: [Int]) {
+        if previousTokens.isEmpty {
+            return (currentTokens, currentTimestamps)
         }
+        if currentTokens.isEmpty {
+            return (previousTokens, previousTimestamps)
+        }
+
+        let previous = createTokenTimings(from: previousTokens, timestamps: previousTimestamps)
+        let current = createTokenTimings(from: currentTokens, timestamps: currentTimestamps)
+
+        let mergedTimings: [TokenTiming]
+        do {
+            mergedTimings = try mergeLongestContiguous(
+                previous,
+                current,
+                overlapDuration: overlapDuration
+            )
+        } catch {
+            mergedTimings = mergeLongestCommonSubsequence(
+                previous,
+                current,
+                overlapDuration: overlapDuration
+            )
+        }
+
+        let mergedTokens = mergedTimings.map { $0.tokenId }
+        let mergedTimestamps = mergedTimings.map { Int(round($0.startTime / 0.08)) }
+        return (mergedTokens, mergedTimestamps)
     }
 
     /// Calculate start frame offset for a sliding window segment

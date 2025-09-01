@@ -54,10 +54,14 @@ struct ChunkProcessor {
 
             // Merge tokens with existing sequence, removing duplicates
             if !windowTokens.isEmpty {
-                let (merged, removedCount) = manager.mergeTokens(previous: allTokens, current: windowTokens)
-                let adjustedTimestamps = Array(windowTimestamps.dropFirst(removedCount))
-                allTokens = merged
-                allTimestamps.append(contentsOf: adjustedTimestamps)
+                let merged = manager.mergeTokens(
+                    previousTokens: allTokens,
+                    previousTimestamps: allTimestamps,
+                    currentTokens: windowTokens,
+                    currentTimestamps: windowTimestamps
+                )
+                allTokens = merged.tokens
+                allTimestamps = merged.timestamps
             }
             centerStart += centerSamples
             segmentIndex += 1

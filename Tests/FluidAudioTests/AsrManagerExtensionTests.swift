@@ -144,9 +144,17 @@ final class AsrManagerExtensionTests: XCTestCase {
     func testMergeTokensNoDuplicates() {
         let previous = [1, 2, 3, 4, 5]
         let current = [6, 7, 8, 9, 10]
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(previous.count..<(previous.count + current.count))
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, current, "No duplicates should return original current")
         XCTAssertEqual(removedCount, 0, "Should not remove any tokens")
@@ -155,42 +163,74 @@ final class AsrManagerExtensionTests: XCTestCase {
     func testMergeTokensWithOverlap() {
         let previous = [1, 2, 3, 4, 5]
         let current = [3, 4, 5, 6, 7, 8]
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(2..<(2 + current.count))
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, [6, 7, 8], "Should remove overlapping tokens")
         XCTAssertEqual(removedCount, 3, "Should remove 3 tokens")
     }
 
     func testMergeTokensPunctuation() {
-        let previous = [1, 2, 3, 7883]  // 7883 is period
+        let previous = [1, 2, 3, 7883]
         let current = [7883, 4, 5, 6]
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(3..<(3 + current.count))
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, [4, 5, 6], "Should remove duplicate punctuation")
         XCTAssertEqual(removedCount, 1, "Should remove 1 punctuation token")
     }
 
     func testMergeTokensQuestionMark() {
-        let previous = [1, 2, 7952]  // 7952 is question mark
+        let previous = [1, 2, 7952]
         let current = [7952, 3, 4]
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(2..<(2 + current.count))
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, [3, 4], "Should remove duplicate question mark")
         XCTAssertEqual(removedCount, 1, "Should remove 1 token")
     }
 
     func testMergeTokensExclamation() {
-        let previous = [1, 2, 7948]  // 7948 is exclamation
+        let previous = [1, 2, 7948]
         let current = [7948, 3, 4]
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(2..<(2 + current.count))
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, [3, 4], "Should remove duplicate exclamation")
         XCTAssertEqual(removedCount, 1, "Should remove 1 token")
@@ -199,9 +239,17 @@ final class AsrManagerExtensionTests: XCTestCase {
     func testMergeTokensEmptyPrevious() {
         let previous: [Int] = []
         let current = [1, 2, 3, 4]
+        let prevTs: [Int] = []
+        let currTs = Array(0..<current.count)
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, current, "Empty previous should return original current")
         XCTAssertEqual(removedCount, 0, "Should not remove any tokens")
@@ -210,9 +258,17 @@ final class AsrManagerExtensionTests: XCTestCase {
     func testMergeTokensEmptyCurrent() {
         let previous = [1, 2, 3, 4]
         let current: [Int] = []
+        let prevTs = Array(0..<previous.count)
+        let currTs: [Int] = []
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, current, "Empty current should return empty array")
         XCTAssertEqual(removedCount, 0, "Should not remove any tokens")
@@ -221,49 +277,58 @@ final class AsrManagerExtensionTests: XCTestCase {
     func testMergeTokensShortSequences() {
         let previous = [1, 2]
         let current = [2, 3]
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(1..<(1 + current.count))
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, [3], "Should remove overlapping token")
         XCTAssertEqual(removedCount, 1, "Should remove 1 token")
     }
 
     func testMergeTokensMaxOverlap() {
-        // Test with overlap longer than default maxOverlap (12)
         let previous = Array(1...20)
-        let current = Array(10...25)  // 10-21 overlaps with previous
+        let current = Array(10...25)
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(9..<(9 + current.count))
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertGreaterThan(removedCount, 0, "Should find some overlap")
-        XCTAssertLessThanOrEqual(removedCount, 12, "Should not exceed maxOverlap")
         XCTAssertEqual(deduped, Array(21...25), "Should append new tokens")
     }
 
     func testMergeTokensPartialOverlap() {
         let previous = [10, 11, 12, 13, 14]
         let current = [12, 13, 14, 15, 16]
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(2..<(2 + current.count))
 
-        let (merged, removedCount) = manager.mergeTokens(previous: previous, current: current)
-        let deduped = Array(merged.dropFirst(previous.count))
+        let merged = manager.mergeTokens(
+            previousTokens: previous,
+            previousTimestamps: prevTs,
+            currentTokens: current,
+            currentTimestamps: currTs
+        )
+        let deduped = Array(merged.tokens.dropFirst(previous.count))
+        let removedCount = previous.count + current.count - merged.tokens.count
 
         XCTAssertEqual(deduped, [15, 16], "Should remove partial overlap")
         XCTAssertEqual(removedCount, 3, "Should remove 3 overlapping tokens")
-    }
-
-    func testMergeTokensCustomMaxOverlap() {
-        let previous = [1, 2, 3, 4, 5, 6]
-        let current = [4, 5, 6, 7, 8, 9]
-
-        let (merged, removedCount) = manager.mergeTokens(
-            previous: previous, current: current, maxOverlap: 2
-        )
-        let deduped = Array(merged.dropFirst(previous.count))
-
-        XCTAssertEqual(deduped, [6, 7, 8, 9], "Should not find overlap with small maxOverlap \(deduped)")
-        XCTAssertEqual(removedCount, 2, "Should remove 2 tokens with small maxOverlap")
     }
 
     // MARK: - Performance Tests
@@ -290,10 +355,17 @@ final class AsrManagerExtensionTests: XCTestCase {
     func testMergeTokensPerformance() {
         let previous = Array(1...1000)
         let current = Array(990...1500)  // 10-token overlap
+        let prevTs = Array(0..<previous.count)
+        let currTs = Array(990..<(990 + current.count))
 
         measure {
             for _ in 0..<1000 {
-                _ = manager.mergeTokens(previous: previous, current: current)
+                _ = manager.mergeTokens(
+                    previousTokens: previous,
+                    previousTimestamps: prevTs,
+                    currentTokens: current,
+                    currentTimestamps: currTs
+                )
             }
         }
     }

@@ -26,6 +26,7 @@ public actor StreamingAsrManager {
     private var segmentIndex: Int = 0
     private var lastProcessedFrame: Int = 0
     private var accumulatedTokens: [Int] = []
+    private var accumulatedTimestamps: [Int] = []
 
     // Raw sample buffer for sliding-window assembly (absolute indexing)
     private var sampleBuffer: [Float] = []
@@ -93,6 +94,7 @@ public actor StreamingAsrManager {
         segmentIndex = 0
         lastProcessedFrame = 0
         accumulatedTokens.removeAll()
+        accumulatedTimestamps.removeAll()
 
         startTime = Date()
 
@@ -164,7 +166,7 @@ public actor StreamingAsrManager {
         if let asrManager = asrManager, !accumulatedTokens.isEmpty {
             let finalResult = asrManager.processTranscriptionResult(
                 tokenIds: accumulatedTokens,
-                timestamps: [],
+                timestamps: accumulatedTimestamps,
                 encoderSequenceLength: 0,
                 audioSamples: [],  // Not needed for final text conversion
                 processingTime: 0
@@ -198,6 +200,7 @@ public actor StreamingAsrManager {
         segmentIndex = 0
         lastProcessedFrame = 0
         accumulatedTokens.removeAll()
+        accumulatedTimestamps.removeAll()
 
         logger.info("StreamingAsrManager reset for source: \(String(describing: self.audioSource))")
     }
@@ -318,11 +321,13 @@ public actor StreamingAsrManager {
                 startFrameOffset: startOffset,
                 lastProcessedFrame: lastProcessedFrame,
                 previousTokens: accumulatedTokens,
+                previousTimestamps: accumulatedTimestamps,
                 enableDebug: config.enableDebug
             )
 
             // Update state
             accumulatedTokens.append(contentsOf: tokens)
+            accumulatedTimestamps.append(contentsOf: timestamps)
             lastProcessedFrame = max(lastProcessedFrame, timestamps.max() ?? 0)
             segmentIndex += 1
 
