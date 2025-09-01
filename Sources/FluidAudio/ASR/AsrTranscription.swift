@@ -307,6 +307,34 @@ extension AsrManager {
 
         return slicedArray
     }
+    
+    internal func findDuplicateTokenSequence(previous: [Int], current: [Int]) -> (Int, Int)? {
+        let punct: Set<Int> = [7883, 7952, 7948]
+        guard let last = (0..<previous.count).reversed().first(where: { !punct.contains(previous[$0]) }) else { return nil }
+        let j0 = (0..<current.count).first(where: { !punct.contains(current[$0]) }) ?? current.count
+        func ok(_ s: Int) -> Bool {
+            var i = s, j = j0
+            while i <= last {
+                while i <= last && punct.contains(previous[i]) { i += 1 }
+                if i > last { return true }
+                while j < current.count && punct.contains(current[j]) { j += 1 }
+                if j >= current.count || vocabulary[previous[i]]?.lowercased() != vocabulary[current[j]]?.lowercased() {
+                    return false
+                }
+                i += 1; j += 1
+            }
+            return true
+        }
+        var start = 0
+        for (i, t) in current.enumerated() {
+            if !punct.contains(t) {
+                start = i
+                break
+            }
+        }
+        for s in 0...last { if ok(s) { return (s, start) } }
+        return nil
+    }
 
     /// Remove duplicate token sequences at the start of the current list that overlap
     /// with the tail of the previous accumulated tokens. Returns deduplicated current tokens
@@ -314,7 +342,7 @@ extension AsrManager {
     /// Ideally this is not needed. We need to make some more fixes to the TDT decoding logic,
     /// this should be a temporary workaround.
     internal func removeDuplicateTokenSequence(
-        previous: [Int], current: [Int], maxOverlap: Int = 12
+        previous: [Int], current: [Int], maxOverlap: Int = 30
     ) -> (deduped: [Int], removedCount: Int) {
 
         // Handle single punctuation token duplicates first
@@ -331,8 +359,8 @@ extension AsrManager {
         }
 
         // Check for suffix-prefix overlap: end of previous matches beginning of current
-        let maxSearchLength = min(15, previous.count)  // last 15 tokens of previous
-        let maxMatchLength = min(maxOverlap, workingCurrent.count)  // first 12 tokens of current
+        let maxSearchLength = min(32, previous.count)
+        let maxMatchLength = min(maxOverlap, workingCurrent.count)
 
         guard maxSearchLength >= 2 && maxMatchLength >= 2 else {
             return (workingCurrent, removedCount)

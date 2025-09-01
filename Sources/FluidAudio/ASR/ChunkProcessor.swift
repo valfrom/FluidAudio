@@ -54,12 +54,22 @@ struct ChunkProcessor {
 
             // For chunks after the first, check for and remove duplicated token sequences
             if segmentIndex > 0 && !allTokens.isEmpty && !windowTokens.isEmpty {
-                let (deduped, removedCount) = manager.removeDuplicateTokenSequence(
-                    previous: allTokens, current: windowTokens)
-                let adjustedTimestamps = Array(windowTimestamps.dropFirst(removedCount))
-
-                allTokens.append(contentsOf: deduped)
-                allTimestamps.append(contentsOf: adjustedTimestamps)
+                if let (index, startIndex) = manager.findDuplicateTokenSequence(
+                    previous: allTokens, current: windowTokens) {
+                    // We shoud return index where duplicated sequence starts and remove it from allTokens and allTimestamps and just add windowTokens and windowTimestamps as is
+                    
+                    print("allTokens: \(allTokens)")
+                    print("windowTokens: \(windowTokens)")
+                    
+                    allTokens.removeSubrange(index...)
+                    allTimestamps.removeSubrange(index...)
+                    
+                    allTokens.append(contentsOf: windowTokens[startIndex...])
+                    allTimestamps.append(contentsOf: windowTimestamps[startIndex...])
+                } else {
+                    allTokens.append(contentsOf: windowTokens)
+                    allTimestamps.append(contentsOf: windowTimestamps)
+                }
             } else {
                 allTokens.append(contentsOf: windowTokens)
                 allTimestamps.append(contentsOf: windowTimestamps)
