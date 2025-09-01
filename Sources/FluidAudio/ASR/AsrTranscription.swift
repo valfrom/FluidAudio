@@ -128,7 +128,6 @@ extension AsrManager {
         source: AudioSource,
         startFrameOffset: Int,
         lastProcessedFrame: Int,
-        previousTokens: [Int] = [],
         enableDebug: Bool
     ) async throws -> (tokens: [Int], timestamps: [Int], encoderSequenceLength: Int) {
         // Select and copy decoder state for the source
@@ -150,18 +149,6 @@ extension AsrManager {
             microphoneDecoderState = state
         } else {
             systemDecoderState = state
-        }
-
-        // Apply token deduplication if previous tokens are provided
-        if !previousTokens.isEmpty && !tokens.isEmpty {
-            let (deduped, removedCount) = removeDuplicateTokenSequence(previous: previousTokens, current: tokens)
-            let adjustedTimestamps = removedCount > 0 ? Array(timestamps.dropFirst(removedCount)) : timestamps
-
-            if enableDebug && removedCount > 0 {
-                logger.debug("Streaming chunk: removed \(removedCount) duplicate tokens")
-            }
-
-            return (deduped, adjustedTimestamps, encLen)
         }
 
         return (tokens, timestamps, encLen)
@@ -306,79 +293,6 @@ extension AsrManager {
         }
 
         return slicedArray
-    }
-
-    /// Remove duplicate token sequences at the start of the current list that overlap
-    /// with the tail of the previous accumulated tokens. Returns deduplicated current tokens
-    /// and the number of removed leading tokens so caller can drop aligned timestamps.
-    /// Ideally this is not needed. We need to make some more fixes to the TDT decoding logic,
-    /// this should be a temporary workaround.
-    internal func removeDuplicateTokenSequence(
-        previous: [Int], current: [Int], maxOverlap: Int = 12
-    ) -> (deduped: [Int], removedCount: Int) {
-
-        // Handle single punctuation token duplicates first
-        let punctuationTokens = [7883, 7952, 7948]  // period, question, exclamation
-        var workingCurrent = current
-        var removedCount = 0
-
-        if !previous.isEmpty && !workingCurrent.isEmpty && previous.last == workingCurrent.first
-            && punctuationTokens.contains(workingCurrent.first!)
-        {
-            // Remove the duplicate punctuation token from the beginning of current
-            workingCurrent = Array(workingCurrent.dropFirst())
-            removedCount += 1
-        }
-
-        // Check for suffix-prefix overlap: end of previous matches beginning of current
-        let maxSearchLength = min(15, previous.count)  // last 15 tokens of previous
-        let maxMatchLength = min(maxOverlap, workingCurrent.count)  // first 12 tokens of current
-
-        guard maxSearchLength >= 2 && maxMatchLength >= 2 else {
-            return (workingCurrent, removedCount)
-        }
-
-        // Search for overlapping sequences from longest to shortest
-        for overlapLength in (2...min(maxSearchLength, maxMatchLength)).reversed() {
-            // Check if the last `overlapLength` tokens of previous match the first `overlapLength` tokens of current
-            let prevSuffix = Array(previous.suffix(overlapLength))
-            let currPrefix = Array(workingCurrent.prefix(overlapLength))
-
-            if prevSuffix == currPrefix {
-                if config.enableDebug {
-                    logger.debug("Found exact suffix-prefix overlap of length \(overlapLength): \(prevSuffix)")
-                }
-                let finalRemoved = removedCount + overlapLength
-                return (Array(workingCurrent.dropFirst(overlapLength)), finalRemoved)
-            }
-        }
-
-        // Extended search: look for partial overlaps within the sequences
-        for overlapLength in (2...min(maxSearchLength, maxMatchLength)).reversed() {
-            let prevStart = max(0, previous.count - maxSearchLength)
-            let prevEnd = previous.count - overlapLength + 1
-            if prevEnd <= prevStart { continue }
-
-            for startIndex in prevStart..<prevEnd {
-                let prevSub = Array(previous[startIndex..<(startIndex + overlapLength)])
-                let currEnd = max(0, workingCurrent.count - overlapLength + 1)
-
-                for currentStart in 0..<min(8, currEnd) {  // Increased search range
-                    let currSub = Array(workingCurrent[currentStart..<(currentStart + overlapLength)])
-                    if prevSub == currSub {
-                        if config.enableDebug {
-                            logger.debug(
-                                "Found duplicate sequence length=\(overlapLength) at currStart=\(currentStart): \(prevSub)"
-                            )
-                        }
-                        let finalRemoved = removedCount + currentStart + overlapLength
-                        return (Array(workingCurrent.dropFirst(currentStart + overlapLength)), finalRemoved)
-                    }
-                }
-            }
-        }
-
-        return (workingCurrent, removedCount)
     }
 
     /// Calculate start frame offset for a sliding window segment

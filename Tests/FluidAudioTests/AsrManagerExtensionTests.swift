@@ -139,125 +139,24 @@ final class AsrManagerExtensionTests: XCTestCase {
         XCTAssertEqual(offset, 0)
     }
 
-    // MARK: - removeDuplicateTokenSequence Tests
+    // MARK: - Token Merging Tests
 
-    func testRemoveDuplicateTokenSequenceNoDuplicates() {
-        let previous = [1, 2, 3, 4, 5]
-        let current = [6, 7, 8, 9, 10]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        XCTAssertEqual(deduped, current, "No duplicates should return original current")
-        XCTAssertEqual(removedCount, 0, "Should not remove any tokens")
+    private func makeToken(_ id: Int, _ start: Double) -> AlignedToken {
+        AlignedToken(id: id, start: start, duration: 0.08)
     }
 
-    func testRemoveDuplicateTokenSequenceWithOverlap() {
-        let previous = [1, 2, 3, 4, 5]
-        let current = [3, 4, 5, 6, 7, 8]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        // Should remove [3, 4, 5] from the beginning of current
-        XCTAssertEqual(deduped, [6, 7, 8], "Should remove overlapping tokens")
-        XCTAssertEqual(removedCount, 3, "Should remove 3 tokens")
+    func testMergeLongestContiguous() throws {
+        let a = [makeToken(1, 0.0), makeToken(2, 0.08), makeToken(3, 0.16)]
+        let b = [makeToken(3, 0.16), makeToken(4, 0.24)]
+        let merged = try mergeLongestContiguous(a, b, overlapDuration: 0.16)
+        XCTAssertEqual(merged.map { $0.id }, [1, 2, 3, 4])
     }
 
-    func testRemoveDuplicateTokenSequencePunctuation() {
-        let previous = [1, 2, 3, 7883]  // 7883 is period
-        let current = [7883, 4, 5, 6]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        // Should remove duplicate period
-        XCTAssertEqual(deduped, [4, 5, 6], "Should remove duplicate punctuation")
-        XCTAssertEqual(removedCount, 1, "Should remove 1 punctuation token")
-    }
-
-    func testRemoveDuplicateTokenSequenceQuestionMark() {
-        let previous = [1, 2, 7952]  // 7952 is question mark
-        let current = [7952, 3, 4]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        XCTAssertEqual(deduped, [3, 4], "Should remove duplicate question mark")
-        XCTAssertEqual(removedCount, 1, "Should remove 1 token")
-    }
-
-    func testRemoveDuplicateTokenSequenceExclamation() {
-        let previous = [1, 2, 7948]  // 7948 is exclamation
-        let current = [7948, 3, 4]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        XCTAssertEqual(deduped, [3, 4], "Should remove duplicate exclamation")
-        XCTAssertEqual(removedCount, 1, "Should remove 1 token")
-    }
-
-    func testRemoveDuplicateTokenSequenceEmptyPrevious() {
-        let previous: [Int] = []
-        let current = [1, 2, 3, 4]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        XCTAssertEqual(deduped, current, "Empty previous should return original current")
-        XCTAssertEqual(removedCount, 0, "Should not remove any tokens")
-    }
-
-    func testRemoveDuplicateTokenSequenceEmptyCurrent() {
-        let previous = [1, 2, 3, 4]
-        let current: [Int] = []
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        XCTAssertEqual(deduped, current, "Empty current should return empty array")
-        XCTAssertEqual(removedCount, 0, "Should not remove any tokens")
-    }
-
-    func testRemoveDuplicateTokenSequenceShortSequences() {
-        let previous = [1, 2]
-        let current = [2, 3]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        // Short sequences (< 3 tokens) should not be processed for overlap
-        XCTAssertEqual(deduped, current, "Short sequences should return original")
-        XCTAssertEqual(removedCount, 0, "Should not remove any tokens")
-    }
-
-    func testRemoveDuplicateTokenSequenceMaxOverlap() {
-        // Test with overlap longer than default maxOverlap (12)
-        let previous = Array(1...20)
-        let current = Array(10...25)  // 10-21 overlaps with previous
-
-        let (_, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        // Should find some overlap within maxOverlap limit
-        XCTAssertGreaterThan(removedCount, 0, "Should find some overlap")
-        XCTAssertLessThanOrEqual(removedCount, 12, "Should not exceed maxOverlap")
-    }
-
-    func testRemoveDuplicateTokenSequencePartialOverlap() {
-        let previous = [10, 11, 12, 13, 14]
-        let current = [12, 13, 14, 15, 16]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(previous: previous, current: current)
-
-        // Should remove [12, 13, 14] from current
-        XCTAssertEqual(deduped, [15, 16], "Should remove partial overlap")
-        XCTAssertEqual(removedCount, 3, "Should remove 3 overlapping tokens")
-    }
-
-    func testRemoveDuplicateTokenSequenceCustomMaxOverlap() {
-        let previous = [1, 2, 3, 4, 5, 6]
-        let current = [4, 5, 6, 7, 8, 9]
-
-        let (deduped, removedCount) = manager.removeDuplicateTokenSequence(
-            previous: previous, current: current, maxOverlap: 2
-        )
-
-        // With maxOverlap=2, should not find the 3-token overlap but only 2-token overlap
-        XCTAssertEqual(deduped, [6, 7, 8, 9], "Should not find overlap with small maxOverlap \(deduped)")
-        XCTAssertEqual(removedCount, 2, "Should not remove any tokens with small maxOverlap")
+    func testMergeLongestCommonSubsequence() {
+        let a = [makeToken(1, 0.0), makeToken(2, 0.08), makeToken(3, 0.16), makeToken(4, 0.24)]
+        let b = [makeToken(2, 0.08), makeToken(99, 0.16), makeToken(3, 0.24), makeToken(4, 0.32), makeToken(5, 0.40)]
+        let merged = mergeLongestCommonSubsequence(a, b, overlapDuration: 0.16)
+        XCTAssertEqual(merged.map { $0.id }, [1, 2, 99, 3, 4, 5])
     }
 
     // MARK: - Performance Tests
@@ -281,13 +180,13 @@ final class AsrManagerExtensionTests: XCTestCase {
         }
     }
 
-    func testRemoveDuplicateTokenSequencePerformance() {
-        let previous = Array(1...1000)
-        let current = Array(990...1500)  // 10-token overlap
-
+    func testMergeLongestContiguousPerformance() {
+        let frameDuration = 0.08
+        let a = (0..<1000).map { makeToken($0, Double($0) * frameDuration) }
+        let b = (500..<1500).map { makeToken($0, Double($0) * frameDuration) }
         measure {
-            for _ in 0..<1000 {
-                _ = manager.removeDuplicateTokenSequence(previous: previous, current: current)
+            for _ in 0..<100 {
+                _ = try? mergeLongestContiguous(a, b, overlapDuration: frameDuration * 2)
             }
         }
     }

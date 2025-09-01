@@ -25,8 +25,7 @@ struct ChunkProcessor {
     func process(
         using manager: AsrManager, decoderState: inout TdtDecoderState, startTime: Date
     ) async throws -> ASRResult {
-        var allTokens: [Int] = []
-        var allTimestamps: [Int] = []
+        var allTokens: [AlignedToken] = []
 
         var centerStart = 0
         var segmentIndex = 0
@@ -52,24 +51,30 @@ struct ChunkProcessor {
                 lastProcessedFrame = maxFrame
             }
 
-            // For chunks after the first, check for and remove duplicated token sequences
-            if segmentIndex > 0 && !allTokens.isEmpty && !windowTokens.isEmpty {
-                let (deduped, removedCount) = manager.removeDuplicateTokenSequence(
-                    previous: allTokens, current: windowTokens)
-                let adjustedTimestamps = Array(windowTimestamps.dropFirst(removedCount))
+            let frameDuration: TimeInterval = 0.08
+            let chunkTokens = zip(windowTokens, windowTimestamps).map {
+                AlignedToken(id: $0.0, start: TimeInterval($0.1) * frameDuration, duration: frameDuration)
+            }
 
-                allTokens.append(contentsOf: deduped)
-                allTimestamps.append(contentsOf: adjustedTimestamps)
+            if segmentIndex > 0 && !allTokens.isEmpty && !chunkTokens.isEmpty {
+                do {
+                    allTokens = try mergeLongestContiguous(
+                        allTokens, chunkTokens, overlapDuration: frameDuration * 2)
+                } catch {
+                    allTokens = mergeLongestCommonSubsequence(
+                        allTokens, chunkTokens, overlapDuration: frameDuration * 2)
+                }
             } else {
-                allTokens.append(contentsOf: windowTokens)
-                allTimestamps.append(contentsOf: windowTimestamps)
+                allTokens = chunkTokens
             }
             centerStart += centerSamples
             segmentIndex += 1
         }
+        let tokenIds = allTokens.map { $0.id }
+        let timestamps = allTokens.map { Int($0.start / 0.08) }
         return manager.processTranscriptionResult(
-            tokenIds: allTokens,
-            timestamps: allTimestamps,
+            tokenIds: tokenIds,
+            timestamps: timestamps,
             encoderSequenceLength: 0,  // Not relevant for chunk processing
             audioSamples: audioSamples,
             processingTime: Date().timeIntervalSince(startTime)

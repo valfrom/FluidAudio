@@ -25,7 +25,7 @@ public actor StreamingAsrManager {
     // Sliding window state
     private var segmentIndex: Int = 0
     private var lastProcessedFrame: Int = 0
-    private var accumulatedTokens: [Int] = []
+    private var accumulatedTokens: [AlignedToken] = []
 
     // Raw sample buffer for sliding-window assembly (absolute indexing)
     private var sampleBuffer: [Float] = []
@@ -162,9 +162,12 @@ public actor StreamingAsrManager {
         // Convert final accumulated tokens to text (proper way to avoid duplicates)
         let finalText: String
         if let asrManager = asrManager, !accumulatedTokens.isEmpty {
+            let frameDuration: TimeInterval = 0.08
+            let ids = accumulatedTokens.map { $0.id }
+            let times = accumulatedTokens.map { Int($0.start / frameDuration) }
             let finalResult = asrManager.processTranscriptionResult(
-                tokenIds: accumulatedTokens,
-                timestamps: [],
+                tokenIds: ids,
+                timestamps: times,
                 encoderSequenceLength: 0,
                 audioSamples: [],  // Not needed for final text conversion
                 processingTime: 0
@@ -311,29 +314,42 @@ public actor StreamingAsrManager {
                 leftContextSeconds: actualLeftSeconds
             )
 
-            // Call AsrManager directly with deduplication
             let (tokens, timestamps, _) = try await asrManager.transcribeStreamingChunk(
                 windowSamples,
                 source: audioSource,
                 startFrameOffset: startOffset,
                 lastProcessedFrame: lastProcessedFrame,
-                previousTokens: accumulatedTokens,
                 enableDebug: config.enableDebug
             )
 
-            // Update state
-            accumulatedTokens.append(contentsOf: tokens)
+            let frameDuration: TimeInterval = 0.08
+            let chunkTokens = zip(tokens, timestamps).map {
+                AlignedToken(id: $0.0, start: TimeInterval($0.1) * frameDuration, duration: frameDuration)
+            }
+
+            let prevCount = accumulatedTokens.count
+            if !accumulatedTokens.isEmpty {
+                do {
+                    accumulatedTokens = try mergeLongestContiguous(
+                        accumulatedTokens, chunkTokens, overlapDuration: frameDuration * 2)
+                } catch {
+                    accumulatedTokens = mergeLongestCommonSubsequence(
+                        accumulatedTokens, chunkTokens, overlapDuration: frameDuration * 2)
+                }
+            } else {
+                accumulatedTokens = chunkTokens
+            }
+
             lastProcessedFrame = max(lastProcessedFrame, timestamps.max() ?? 0)
             segmentIndex += 1
 
             let processingTime = Date().timeIntervalSince(chunkStartTime)
             processedChunks += 1
 
-            // Convert only the current chunk tokens to text for clean incremental updates
-            // The final result will use all accumulated tokens for proper deduplication
+            let newTokens = Array(accumulatedTokens.dropFirst(prevCount))
             let interim = asrManager.processTranscriptionResult(
-                tokenIds: tokens,  // Only current chunk tokens for progress updates
-                timestamps: timestamps,
+                tokenIds: newTokens.map { $0.id },
+                timestamps: newTokens.map { Int($0.start / frameDuration) },
                 encoderSequenceLength: 0,
                 audioSamples: windowSamples,
                 processingTime: processingTime
